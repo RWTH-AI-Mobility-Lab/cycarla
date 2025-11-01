@@ -20,6 +20,8 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+*build/
+*dist/
 develop-eggs/
 dist/
 downloads/
@@ -204,3 +206,6 @@ jspm_packages
 # Optional REPL history
 .node_repl_history
 .next
+
+# tauri icons
+cycarla-app/src-tauri/icons/
