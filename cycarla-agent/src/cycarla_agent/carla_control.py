@@ -133,7 +133,88 @@ class ControlCarlaWithCyclingBLE():
 
         self.world.player.apply_control(self._control)
 
+class ControlCarlaWithKeyboard():
+    def __init__(self, world):
+        self.world = world
+        if not isinstance(world.player, carla.Vehicle):
+            raise ValueError("Player must be a vehicle")
 
+        self._steer = 0
+        self._throttle = False
+        self._brake = False
+        self._steer = None
+        self._steer_cache = 0
+        
+        self._control = carla.VehicleControl()
+        self._lights = carla.VehicleLightState.NONE
+        world.player.set_autopilot(False)
+        world.player.set_light_state(self._lights)
+    
+    def parse_control_event(self, event):
+        if event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_RETURN:
+                self.world.player.set_autopilot(False)
+            if event.key == pygame.K_UP or event.key == pygame.K_w:
+                self._throttle = True
+            if event.key == pygame.K_DOWN or event.key == pygame.K_s:
+                self._brake = True
+            if event.key == pygame.K_RIGHT or event.key == pygame.K_d:
+                self._steer = 1
+            if event.key == pygame.K_LEFT or event.key == pygame.K_a:
+                self._steer = -1
+        if event.type == pygame.KEYUP:
+            if event.key == pygame.K_UP or event.key == pygame.K_w:
+                self._throttle = False
+            if event.key == pygame.K_DOWN or event.key == pygame.K_s:
+                self._brake = False
+                self._control.reverse = False
+            if event.key == pygame.K_RIGHT or event.key == pygame.K_d:
+                self._steer = None
+            if event.key == pygame.K_LEFT or event.key == pygame.K_a:
+                self._steer = None
+
+    def update_player_control(self):
+        if self._throttle: 
+            self._control.throttle = min(self._control.throttle + 0.1, 1)
+            self._control.gear = 1
+            self._control.brake = False
+        elif not self._brake:
+            self._control.throttle = 0.0
+
+        if self._brake:
+            # If the down arrow is held down when the car is stationary, switch to reverse
+            
+            if self.world.player.get_velocity().length() < 0.01 and not self._control.reverse:
+                self._control.brake = 0.0
+                self._control.gear = 1
+                self._control.reverse = True
+                self._control.throttle = min(self._control.throttle + 0.1, 1)
+            elif self._control.reverse:
+                self._control.throttle = min(self._control.throttle + 0.1, 1)
+            else:
+                self._control.throttle = 0.0
+                self._control.brake = min(self._control.brake + 0.3, 1)
+        else:
+            self._control.brake = 0.0
+
+        if self._steer is not None:
+            if self._steer == 1:
+                self._steer_cache += 0.03
+            if self._steer == -1:
+                self._steer_cache -= 0.03
+            min(0.7, max(-0.7, self._steer_cache))
+            self._control.steer = round(self._steer_cache,1)
+        else:
+            if self._steer_cache > 0.0:
+                self._steer_cache *= 0.2
+            if self._steer_cache < 0.0:
+                self._steer_cache *= 0.2
+            if 0.01 > self._steer_cache > -0.01:
+                self._steer_cache = 0.0
+            self._control.steer = round(self._steer_cache,1)
+        
+        self.world.player.apply_control(self._control)
+        pass # to be implemented
         
 
 # ==============================================================================

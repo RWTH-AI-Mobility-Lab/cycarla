@@ -17,6 +17,7 @@ from cycarla_agent.gpx import GPXCreator
 # hide pygame window
 # import os
 # os.environ["SDL_VIDEODRIVER"] = "dummy"
+os.environ['SDL_VIDEO_X11_NET_WM_PING'] = '0'
 
 # frame = None # carla simulation frame. It is global because it is updated in the game loop which is started by websocket and sent through MJPEG stream from a flask route
 
@@ -102,16 +103,17 @@ def game_loop(args, game_state: GameState, map):
             print("WARNING: You are currently in asynchronous mode and could "
                   "experience some issues with the traffic simulation")
 
-        # display = pygame.display.set_mode(
-        #     (args.width, args.height),
-        #     pygame.HWSURFACE | pygame.DOUBLEBUF)
-        display = pygame.display.set_mode((args.width, args.height), flags=pygame.HIDDEN)
+        display = pygame.display.set_mode(
+            (args.width, args.height),
+            pygame.HWSURFACE | pygame.DOUBLEBUF)
+        # display = pygame.display.set_mode((args.width, args.height), flags=pygame.HIDDEN)
         pygame.display.flip()
 
         reporter = Reporter(args.width, args.height, socketio)
         world = World(sim_world, reporter, args)
 
-        controller = ControlCarlaWithCyclingBLE(world) # replaces KeyboardControl(world) in demo code
+        BLEController = ControlCarlaWithCyclingBLE(world) # replaces KeyboardControl(world) in demo code
+        KBController = ControlCarlaWithKeyboard(world)
 
         if args.sync:
             sim_world.tick()
@@ -144,7 +146,10 @@ def game_loop(args, game_state: GameState, map):
                 socketio.emit('game_finished', 'true')
                 break
 
-
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT:
+                    return
+                KBController.parse_control_event(event)
 
             # clock.tick_busy_loop(59)
 
@@ -157,7 +162,7 @@ def game_loop(args, game_state: GameState, map):
                 prior_autopilot = game_state.autopilot
 
             if not game_state.autopilot:
-                controller.update_player_control(
+                BLEController.update_player_control(
                     live_control_state.steer,
                     live_control_state.throttle,
                     live_control_state.brake,
@@ -165,6 +170,8 @@ def game_loop(args, game_state: GameState, map):
                     live_control_state.wheel_speed,
                     reporter.simulation_live_data.road_gradient # pass in gradient to simulate downhill speed
                 )
+                KBController.update_player_control()
+            
 
             if game_state.change_camera:
                 world.camera_manager.toggle_camera()
