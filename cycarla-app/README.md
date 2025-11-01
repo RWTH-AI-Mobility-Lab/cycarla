@@ -17,6 +17,11 @@ cd cycarla-app
 ```
 deno install
 ```
+To reduce git LFS use, we put the icon at ./app-icon.png, you can replace it with PNGs you want. Then run `npm run tauri icon` to generate icons for this project.
+```
+npm run tauri icon
+```
+
 Then, run app in development mode: 
 ```
 deno task tauri dev
