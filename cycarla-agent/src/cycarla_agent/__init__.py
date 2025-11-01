@@ -44,6 +44,37 @@ FIRST_GAME_LOOP = True
 
 live_control_state = LiveControlState()
 
+# Keyboard control state and priority flag
+keyboard_control_state = LiveControlState()
+keyboard_control_enabled = False
+
+def get_active_control_state():
+    """Return the currently active control state depending on priority.
+
+    If keyboard control is enabled, return `keyboard_control_state`, else return
+    `live_control_state` (which is updated by BLE inputs).
+    """
+    # Prefer BLE input if there was recent BLE activity. If BLE has been
+    # inactive for more than BLE_TIMEOUT seconds and keyboard control is
+    # enabled, use keyboard as a fallback. Otherwise return BLE state.
+    try:
+        last = last_ble_activity
+    except NameError:
+        # If not yet defined, treat as no recent BLE activity
+        last = 0
+
+    if time.time() - last < BLE_TIMEOUT:
+        return live_control_state
+    elif keyboard_control_enabled:
+        return keyboard_control_state
+    else:
+        return live_control_state
+
+# Timestamp of last BLE activity (seconds since epoch)
+last_ble_activity = 0.0
+# How long to consider BLE "active" (seconds)
+BLE_TIMEOUT = 3.0
+
 pycycling_input = None
 
 road_gradient_offset = 0.0 # user-selected +/-10 percent gradient offset for choosing default difficulty
@@ -157,12 +188,14 @@ def game_loop(args, game_state: GameState, map):
                 prior_autopilot = game_state.autopilot
 
             if not game_state.autopilot:
+                # Choose active control state according to priority
+                active_control = get_active_control_state()
                 controller.update_player_control(
-                    live_control_state.steer,
-                    live_control_state.throttle,
-                    live_control_state.brake,
+                    active_control.steer,
+                    active_control.throttle,
+                    active_control.brake,
                     reporter.simulation_live_data.speed, # pass in current speed from simulator to modulate steering sensitivity
-                    live_control_state.wheel_speed,
+                    active_control.wheel_speed,
                     reporter.simulation_live_data.road_gradient # pass in gradient to simulate downhill speed
                 )
 
@@ -224,14 +257,15 @@ def game_loop(args, game_state: GameState, map):
             if i % 15 == 0: # don't create a GPX point for every frame, it messes up strava
                 # North-south offsets change the distance travelled, so stick to places close to the equator.
                 gnss_offset = (-0.849541, -91.104870) # Galapagos islands
+                active_control = get_active_control_state()
 
                 gpx_creator.add_trackpoint(
                     reporter.simulation_live_data.gnss[0] + gnss_offset[0],
                     reporter.simulation_live_data.gnss[1] + gnss_offset[1],
                     reporter.simulation_live_data.altitude,
                     f"{time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime())}.{int(time.time() * 1000 % 1000)}Z", # we need millisecond precision because there are multiple trackpoints per second. Using seconds causes speed calculation problems in Strava.
-                    live_control_state.watts or None, # uses OR short-circuiting
-                    live_control_state.cadence or None,
+                    active_control.watts or None, # uses OR short-circuiting
+                    active_control.cadence or None,
                 )
 
 
@@ -269,16 +303,37 @@ def handle_bt_scan():
     cycling_ble_devices = asyncio.run(scan_bt_async_runner())
 
     if len(cycling_ble_devices['sterzos']) > 0 and len(cycling_ble_devices['smart_trainers']) > 0:
+        # Wrap callbacks to update BLE "last activity" timestamp so the
+        # priority logic can prefer BLE when recent data is available.
+        def _on_steering_update(value):
+            live_control_state.update_steer(value)
+            global last_ble_activity
+            last_ble_activity = time.time()
+
+        def _on_power_update(value):
+            live_control_state.update_throttle(value)
+            global last_ble_activity
+            last_ble_activity = time.time()
+
+        def _on_speed_update(value):
+            live_control_state.update_speed(value)
+            global last_ble_activity
+            last_ble_activity = time.time()
+
+        def _on_cadence_update(value):
+            live_control_state.update_cadence(value)
+            global last_ble_activity
+            last_ble_activity = time.time()
 
         pycycling_input = PycyclingInput(
             # TODO: What if there are multiple devices for each category?
             cycling_ble_devices['sterzos'][0],
             cycling_ble_devices['smart_trainers'][0],
             socketio=socketio,
-            on_steering_update=live_control_state.update_steer,
-            on_power_update=live_control_state.update_throttle,
-            on_speed_update=live_control_state.update_speed,
-            on_cadence_update=live_control_state.update_cadence
+            on_steering_update=_on_steering_update,
+            on_power_update=_on_power_update,
+            on_speed_update=_on_speed_update,
+            on_cadence_update=_on_cadence_update
         )
 
         asyncio.run(pycycling_input.run_all())
@@ -324,6 +379,54 @@ def handle_added_gradient_percent(gradient_percent):
     # by changing the default gradient percent
     print(f"Added gradient percent: {gradient_percent}")
     road_gradient_offset = gradient_percent
+
+
+@socketio.on('keyboard_control_enable')
+def handle_keyboard_control_enable(enabled):
+    """Enable or disable keyboard control as a fallback source.
+
+    When enabled, keyboard input will be used only if BLE has been inactive
+    for longer than BLE_TIMEOUT. The frontend should emit a boolean here to
+    toggle whether keyboard fallback is allowed.
+    """
+    global keyboard_control_enabled
+    keyboard_control_enabled = bool(enabled)
+    print(f"Keyboard control enabled: {keyboard_control_enabled}")
+    # Notify clients of current state
+    socketio.emit('keyboard_control_actual', keyboard_control_enabled)
+
+
+@socketio.on('keyboard_control')
+def handle_keyboard_control(data):
+    """Receive keyboard control values from frontend and apply them when enabled.
+
+    Expected data shape: { 'steer': float, 'throttle': float, 'brake': float }
+    """
+    if not keyboard_control_enabled:
+        # Ignore keyboard inputs when not enabled to avoid conflicts with BLE
+        # Could also emit a warning back to client
+        print("Received keyboard_control but keyboard control is disabled. Ignoring.")
+        return
+
+    try:
+        steer = float(data.get('steer', 0.0))
+        throttle = float(data.get('throttle', 0.0))
+        brake = float(data.get('brake', 0.0))
+    except Exception as e:
+        print(f"Invalid keyboard_control data: {data} - {e}")
+        return
+
+    # Update keyboard control state (these values will be used in the game loop)
+    keyboard_control_state.steer = steer
+    keyboard_control_state.throttle = throttle
+    keyboard_control_state.brake = brake
+
+    # Acknowledge back to frontend (optional)
+    socketio.emit('keyboard_control_applied', {
+        'steer': steer,
+        'throttle': throttle,
+        'brake': brake,
+    })
 
 
 def start_game_loop(map="Town01"):
